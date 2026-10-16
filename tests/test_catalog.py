@@ -35,7 +35,14 @@ async def test_fetch_site_catalog(site_entries) -> None:
         await fetch_site_catalog(session, "starlink")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("body", ["not json", "[]", '[{"MAG": 1}]'])
+def test_string_magnitude_is_a_number(site_entries) -> None:
+    entry = {**site_entries[0], "MAG": "-1.75"}
+    assert parse_site_catalog([entry])[0].magnitude == -1.75
+
+
+@pytest.mark.parametrize(
+    "body", ["not json", "[]", '[{"MAG": 1}]', '{"error": "rate limited"}', "[1, 2]"]
+)
 async def test_fetch_malformed_site_catalog(body: str) -> None:
     session = FakeSession()
     session.add(SITE_CATALOG_BASE_URL + "brightest-sats.json", body)

@@ -14,7 +14,7 @@ Tonight" (https://james.darpinian.com/satellites/), used with permission:
   Starlink passes.
 
 Everything is vectorized with numpy; a 5 day prediction for the ~900
-satellite catalog takes a few seconds.
+satellite catalog takes under a second.
 """
 
 from __future__ import annotations
@@ -45,6 +45,15 @@ _COARSE_MAGNITUDE_MARGIN = 2.0
 # Passes separated by at most this much are grouped together.
 _GROUP_GAP_S = 60
 _CHUNK_SATS = 48
+# Largest catalog number a TLE's five-character (Alpha-5) field can hold.
+_MAX_TLE_SATNUM = 339999
+# OMM fields sgp4 requires but SGP4 itself doesn't use.
+_SGP4_LABEL_DEFAULTS = {
+    "CLASSIFICATION_TYPE": "U",
+    "OBJECT_ID": "",
+    "ELEMENT_SET_NO": "0",
+    "REV_AT_EPOCH": "0",
+}
 
 # Limiting magnitude by sun angle from zenith. Weaver 1947, "The Visibility
 # Of Stars Without Optical Aid", PASP 59, 232, fig. 2, with daylight made a
@@ -122,8 +131,19 @@ class Satellite:
 
     def satrec(self) -> Satrec:
         """SGP4 propagator for this satellite."""
+        fields = dict(self.omm)
+        # CelesTrak gives new launches temporary 9-digit catalog numbers until
+        # they are cataloged. sgp4 rejects numbers that don't fit a TLE, but
+        # SGP4 only uses the number as a label.
+        if int(fields["NORAD_CAT_ID"]) > _MAX_TLE_SATNUM:
+            fields["NORAD_CAT_ID"] = "0"
+        # sgp4 also requires other labels and parses the epoch with one strict
+        # format (no "Z", six fractional digits).
+        for key, default in _SGP4_LABEL_DEFAULTS.items():
+            fields.setdefault(key, default)
+        fields["EPOCH"] = self.epoch.strftime("%Y-%m-%dT%H:%M:%S.%f")
         sat = Satrec()
-        omm.initialize(sat, dict(self.omm))
+        omm.initialize(sat, fields)
         return sat
 
 
@@ -469,7 +489,7 @@ def _transits_for_satellite(
         rise = int(np.argmax(fine))
         after = np.nonzero(~fine[rise:])[0]
         fall = rise + int(after[0]) if len(after) else len(fine)
-        brightest = int(np.argmin(mag))
+        brightest = rise + int(np.argmin(mag[rise:fall]))
         start_time = t0 + timedelta(seconds=float(seconds[rise]))
         end_time = t0 + timedelta(seconds=float(seconds[fall] if fall < len(fine) else end * 60))
         last_visible = max(fall - 1, rise)
@@ -510,29 +530,35 @@ def predict_transits(
     n_minutes = int(days * 24 * 60)
 
     # Satellites whose elements are from the future (launch predictions) are
-    # propagated from their epoch onwards.
+    # propagated from their epoch to the end of the window.
     batches: dict[int, list[Satellite]] = {}
+    bounds: dict[int, float] = {}
     for sat in satellites:
         if sat.magnitude is None and not sat.model:
             continue
         first = max(0.0, (sat.epoch - start).total_seconds() / 60)
         if first >= n_minutes:
             continue
+        # Skip satellites that can never get bright enough.
+        bound = brightest_possible(sat)
+        if bound >= max_magnitude:
+            continue
+        bounds[id(sat)] = bound
         batches.setdefault(int(first), []).append(sat)
 
     transits: list[Transit] = []
     for first_minute, sats in batches.items():
         t0 = start + timedelta(minutes=first_minute)
         jd_whole, jd_frac = _jd_parts(t0)
-        offsets = np.arange(n_minutes, dtype=float) / 1440.0
-        jd = np.full(n_minutes, jd_whole)
+        batch_minutes = n_minutes - first_minute
+        offsets = np.arange(batch_minutes, dtype=float) / 1440.0
+        jd = np.full(batch_minutes, jd_whole)
         fr = jd_frac + offsets
         sun = _sun_ecef(jd + fr)
         sun_angle = np.arccos(np.clip(sun @ observer.normal / np.linalg.norm(sun, axis=-1), -1, 1))
         sky_limit = np.interp(sun_angle, _SUN_ANGLES, _LIMITING_MAGNITUDES, left=-100.0) - 0.3
         # Chunks of similar brightness share the minutes when the sky is dark
         # enough for their brightest member; the rest are never visible.
-        bounds = {id(s): brightest_possible(s) for s in sats}
         by_brightness = sorted(sats, key=lambda s: bounds[id(s)])
         for i in range(0, len(by_brightness), _CHUNK_SATS):
             chunk = by_brightness[i : i + _CHUNK_SATS]
@@ -544,7 +570,7 @@ def predict_transits(
             if not len(minutes):
                 continue
             satrecs = [s.satrec() for s in chunk]
-            positions = np.full((len(chunk), n_minutes, 3), np.nan)
+            positions = np.full((len(chunk), batch_minutes, 3), np.nan)
             positions[:, minutes] = _propagate(satrecs, jd[minutes], fr[minutes])
             intrinsic = np.repeat(
                 [s.magnitude if s.magnitude is not None else np.inf for s in chunk],
@@ -558,7 +584,7 @@ def predict_transits(
                 intrinsic,
                 model,
             )
-            mag = np.full((len(chunk), n_minutes), np.inf)
+            mag = np.full((len(chunk), batch_minutes), np.inf)
             mag[:, minutes] = dark_mag.reshape(len(chunk), len(minutes))
             for j, sat in enumerate(chunk):
                 if not np.any(mag[j] < max_magnitude + _COARSE_MAGNITUDE_MARGIN):

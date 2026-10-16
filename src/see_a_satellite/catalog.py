@@ -37,7 +37,10 @@ def parse_site_catalog(entries: Iterable[Mapping[str, Any]]) -> list[Satellite]:
         fields = {
             k: v for k, v in entry.items() if k not in ("MAG", "MODEL", "TLE_LINE1", "TLE_LINE2")
         }
-        satellites.append(Satellite.from_omm(fields, entry.get("MAG"), entry.get("MODEL")))
+        mag = entry.get("MAG")
+        satellites.append(
+            Satellite.from_omm(fields, None if mag is None else float(mag), entry.get("MODEL"))
+        )
     return satellites
 
 
@@ -57,7 +60,8 @@ async def fetch_site_catalog(
         raise CatalogError(f"Error fetching {url}: {err}") from err
     try:
         satellites = parse_site_catalog(json.loads(data))
-    except (ValueError, KeyError, TypeError) as err:
+    # AttributeError: entries that aren't objects, e.g. a JSON error body.
+    except (ValueError, KeyError, TypeError, AttributeError) as err:
         raise CatalogError(f"Malformed site catalog: {err}") from err
     if not satellites:
         raise CatalogError("Site catalog is empty")

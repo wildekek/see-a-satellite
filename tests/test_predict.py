@@ -1,6 +1,6 @@
 """Check the predictions against passes computed by the website itself."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 
@@ -75,6 +75,62 @@ def test_starlink_trains_only_keep_large_groups(satellites, transits) -> None:
     """In train mode, groups of five or fewer satellites are dropped."""
     groups = group_transits(transits, trains=True, catalog_size=len(satellites))
     assert all(g.satellite_count > 5 for g in groups)
+
+
+def test_temporary_catalog_number(transits) -> None:
+    """Objects with CelesTrak's temporary 9-digit catalog numbers are predicted.
+
+    sgp4 rejects numbers that don't fit a TLE (above 339999), and one such
+    satellite used to stop the whole prediction.
+    """
+    original = transits[0].satellite
+    temporary = Satellite.from_omm(
+        {**original.omm, "NORAD_CAT_ID": "799501674"}, original.magnitude, original.model
+    )
+    ours = predict_transits([original, temporary], 52.0277, 5.5583, 194, start=START)
+    by_id = {
+        sat_id: [(t.start, t.end) for t in ours if t.satellite.norad_id == sat_id]
+        for sat_id in (original.norad_id, 799501674)
+    }
+    assert by_id[original.norad_id]
+    assert by_id[799501674] == by_id[original.norad_id]
+    assert temporary.omm["NORAD_CAT_ID"] == "799501674"
+
+
+def test_future_epoch_stays_in_window(transits) -> None:
+    """A launch prediction is propagated from its epoch to the end of the window.
+
+    It used to be propagated for the full number of days from its epoch, so
+    passes days after the window came back.
+    """
+    original = next(t.satellite for t in transits if t.satellite.name == "BlueWalker 3")
+    epoch = START + timedelta(days=2)
+    launch = Satellite.from_omm(
+        {**original.omm, "EPOCH": epoch.strftime("%Y-%m-%dT%H:%M:%S.%f")},
+        original.magnitude,
+        original.model,
+    )
+    ours = predict_transits([launch], 52.0277, 5.5583, 194, start=START, days=5)
+    assert ours
+    assert all(epoch <= t.start and t.end <= START + timedelta(days=5) for t in ours)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"EPOCH": "2026-10-09T22:48:38.797056Z"},
+        {"EPOCH": "2026-10-09T22:48:38"},
+        {"CLASSIFICATION_TYPE": None, "ELEMENT_SET_NO": None, "REV_AT_EPOCH": None},
+    ],
+)
+def test_satrec_accepts_omm_variants(satellites, fields) -> None:
+    """Epoch formats and label fields sgp4 is strict about don't stop prediction."""
+    original = next(s for s in satellites if s.norad_id == 25544)
+    omm_fields = {k: v for k, v in {**original.omm, **fields}.items() if v is not None}
+    sat = Satellite.from_omm(omm_fields, original.magnitude)
+    error, position, _ = sat.satrec().sgp4(2461323.5, 0.0)
+    assert error == 0
+    assert 6700 < sum(x * x for x in position) ** 0.5 < 6900
 
 
 def test_satellite_from_omm() -> None:
