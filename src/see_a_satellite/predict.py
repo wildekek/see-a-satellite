@@ -34,6 +34,7 @@ _B = 6356752.3142451793
 _E2 = 1.0 - (_B * _B) / (_A * _A)
 _AU_M = 149597870700.0
 _EARTH_MU = 398600.4418  # km^3/s^2
+_MAX_ALPHA5 = 339999  # Highest catalog number a TLE (and SGP4) can hold.
 
 DAYS_TO_CHECK = 5
 DEFAULT_MAX_MAGNITUDE = 3.0
@@ -122,8 +123,14 @@ class Satellite:
 
     def satrec(self) -> Satrec:
         """SGP4 propagator for this satellite."""
+        fields = dict(self.omm)
+        # SGP4 stores the number in the five-character TLE field and refuses
+        # anything past Alpha-5's 339999. It is only a label there, so newer
+        # catalog numbers propagate under a placeholder.
+        if self.norad_id > _MAX_ALPHA5:
+            fields["NORAD_CAT_ID"] = "0"
         sat = Satrec()
-        omm.initialize(sat, dict(self.omm))
+        omm.initialize(sat, fields)
         return sat
 
 

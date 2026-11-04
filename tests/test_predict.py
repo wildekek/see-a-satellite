@@ -108,3 +108,11 @@ def test_satellite_from_omm() -> None:
     error, position, _ = sat.satrec().sgp4(2461323.5, 0.0)
     assert error == 0
     assert 6700 < sum(x * x for x in position) ** 0.5 < 6900
+
+
+def test_satellite_past_alpha5(satellites: list[Satellite]) -> None:
+    """Catalog numbers too large for a TLE still propagate."""
+    iss = next(s for s in satellites if s.norad_id == 25544)
+    big = Satellite.from_omm({**iss.omm, "NORAD_CAT_ID": "400000"}, iss.magnitude)
+    assert big.norad_id == 400000
+    assert big.satrec().sgp4(2461323.5, 0.0) == iss.satrec().sgp4(2461323.5, 0.0)
